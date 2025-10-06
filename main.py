@@ -1,161 +1,131 @@
+import asyncio
 import os
-import time
-import threading
-import logging
-from pathlib import Path
-from flask import Flask, jsonify
-import pyotp
-from SmartApi.smartConnect import SmartConnect
 from telegram import Bot
+from dhanhq import dhanhq
+from datetime import datetime
+import logging
 
-# Basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-logger = logging.getLogger('angel-railway-bot')
+# Logging setup
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# Load config from env
-API_KEY = os.getenv('SMARTAPI_API_KEY')
-CLIENT_ID = os.getenv('SMARTAPI_CLIENT_ID')
-PASSWORD = os.getenv('SMARTAPI_PASSWORD')
-TOTP_SECRET = os.getenv('SMARTAPI_TOTP_SECRET')
-TELE_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELE_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-POLL_INTERVAL = int(os.getenv('POLL_INTERVAL') or 60)
+# ========================
+# CONFIGURATION - Environment Variables वरून घ्या
+# ========================
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
-REQUIRED = [API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET, TELE_TOKEN, TELE_CHAT_ID]
+# Nifty 50 Security ID
+NIFTY_50_SECURITY_ID = "13"
 
-app = Flask(__name__)
+# ========================
+# BOT CODE
+# ========================
 
-def tele_send(bot: Bot, chat_id: str, text: str):
-    try:
-        bot.send_message(chat_id=chat_id, text=text)
-    except Exception as e:
-        logger.exception('Telegram send failed: %s', e)
-
-def login_and_setup(api_key, client_id, password, totp_secret):
-    smartApi = SmartConnect(api_key=api_key)
-    totp = pyotp.TOTP(totp_secret).now()
-    logger.info('Logging in to SmartAPI...')
-    data = smartApi.generateSession(client_id, password, totp)
-    if not data or data.get('status') is False:
-        raise RuntimeError(f"Login failed: {data}")
-    authToken = data['data']['jwtToken']
-    refreshToken = data['data']['refreshToken']
-    logger.info('Login successful, fetching feed token...')
-    try:
-        feedToken = smartApi.getfeedToken()
-    except Exception:
-        feedToken = None
-    # generateToken if needed
-    try:
-        smartApi.generateToken(refreshToken)
-    except Exception:
-        logger.debug('generateToken not required or failed silently')
-    return smartApi, authToken, refreshToken, feedToken
-
-def find_symboltoken_for_query(smartApi, query):
-    logger.info(f"Searching symbol for: {query}")
-    try:
-        res = smartApi.searchScrip(query)
-    except TypeError:
+class NiftyLTPBot:
+    def __init__(self):
+        self.bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        self.dhan = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
+        self.running = True
+        logger.info("Bot initialized successfully")
+    
+    def get_nifty_ltp(self):
+        """Dhan वरून Nifty 50 चा LTP घेतो"""
         try:
-            res = smartApi.searchScrip('NSE', query)
+            ltp_data = self.dhan.get_ltp_data(
+                exchange_segment=self.dhan.IDX,
+                security_id=NIFTY_50_SECURITY_ID
+            )
+            
+            if ltp_data and 'data' in ltp_data:
+                ltp = ltp_data['data']['LTP']
+                logger.info(f"LTP fetched: {ltp}")
+                return ltp
+            return None
+            
         except Exception as e:
-            logger.exception('searchScrip failed: %s', e)
+            logger.error(f"Error getting LTP: {e}")
             return None
+    
+    async def send_ltp_message(self, ltp):
+        """Telegram वर LTP पाठवतो"""
+        try:
+            timestamp = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+            message = f"📊 *NIFTY 50 LTP*\n\n"
+            message += f"💰 Price: ₹{ltp}\n"
+            message += f"🕐 Time: {timestamp}\n"
+            message += f"\n_Updated every minute_ ⏱️"
+            
+            await self.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=message,
+                parse_mode='Markdown'
+            )
+            logger.info(f"Message sent - LTP: {ltp}")
+            
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+    
+    async def run(self):
+        """Main loop - दर मिनिटाला LTP पाठवतो"""
+        logger.info("🚀 Bot started! Sending Nifty 50 LTP every minute...")
+        
+        await self.send_startup_message()
+        
+        while self.running:
+            try:
+                ltp = self.get_nifty_ltp()
+                
+                if ltp:
+                    await self.send_ltp_message(ltp)
+                else:
+                    logger.warning("Could not fetch LTP")
+                
+                await asyncio.sleep(60)
+                
+            except KeyboardInterrupt:
+                logger.info("Bot stopped by user")
+                self.running = False
+                break
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+                await asyncio.sleep(60)
+    
+    async def send_startup_message(self):
+        """Bot सुरू झाल्यावर message पाठवतो"""
+        try:
+            msg = "🤖 *Nifty 50 LTP Bot Started!*\n\n"
+            msg += "तुम्हाला आता दर मिनिटाला Nifty 50 चा LTP मिळेल! 📈\n"
+            msg += f"Deployed on Railway.app 🚂"
+            
+            await self.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=msg,
+                parse_mode='Markdown'
+            )
+            logger.info("Startup message sent")
+        except Exception as e:
+            logger.error(f"Error sending startup message: {e}")
+
+
+# ========================
+# BOT RUN करा
+# ========================
+if __name__ == "__main__":
+    try:
+        # Environment variables check
+        if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN]):
+            logger.error("❌ Missing environment variables!")
+            logger.error("Please set: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN")
+            exit(1)
+        
+        bot = NiftyLTPBot()
+        asyncio.run(bot.run())
     except Exception as e:
-        logger.exception('searchScrip failed: %s', e)
-        return None
-
-    try:
-        candidates = res.get('data') if isinstance(res, dict) and 'data' in res else res
-        if not candidates:
-            return None
-        first = candidates[0]
-        token = first.get('symboltoken') or first.get('token') or first.get('symbolToken')
-        tradingsymbol = first.get('tradingsymbol') or first.get('tradingsymbol') or first.get('symbol')
-        return {'symboltoken': str(token), 'tradingsymbol': tradingsymbol}
-    except Exception:
-        logger.exception('Parsing searchScrip response failed')
-        return None
-
-def get_ltp(smartApi, exchange, tradingsymbol, symboltoken):
-    try:
-        data = smartApi.ltpData(exchange, tradingsymbol, symboltoken)
-        if isinstance(data, dict) and data.get('status') is not False:
-            d = data.get('data') if isinstance(data.get('data'), dict) else data
-            ltp = None
-            if isinstance(d, dict):
-                ltp = d.get('ltp') or d.get('last_price') or d.get('ltpValue')
-            if ltp is None and isinstance(d, list) and len(d) > 0:
-                entry = d[0]
-                ltp = entry.get('ltp') or entry.get('last_price')
-            return float(ltp) if ltp is not None else None
-        else:
-            logger.warning('ltpData returned unexpected: %s', data)
-            return None
-    except Exception:
-        logger.exception('ltpData call failed')
-        return None
-
-def bot_loop():
-    if not all(REQUIRED):
-        logger.error('Missing required environment variables. Bot will not start.')
-        return
-
-    bot = Bot(token=TELE_TOKEN)
-
-    try:
-        smartApi, authToken, refreshToken, feedToken = login_and_setup(API_KEY, CLIENT_ID, PASSWORD, TOTP_SECRET)
-    except Exception as e:
-        logger.exception('Login/setup failed: %s', e)
-        tele_send(bot, TELE_CHAT_ID, f'Login failed: {e}')
-        return
-
-    targets = ['NIFTY 50', 'SENSEX']
-    found = {}
-    for t in targets:
-        info = find_symboltoken_for_query(smartApi, t)
-        if not info:
-            logger.warning('Could not find symbol for %s', t)
-            tele_send(bot, TELE_CHAT_ID, f'Could not find symbol token for {t}.')
-        else:
-            found[t] = info
-
-    if not found:
-        logger.error('No symbols found. Exiting bot loop.')
-        tele_send(bot, TELE_CHAT_ID, 'No symbols found; bot stopped.')
-        return
-
-    tele_send(bot, TELE_CHAT_ID, f"Bot started. Polling every {POLL_INTERVAL}s for: {', '.join(found.keys())}")
-
-    while True:
-        messages = []
-        ts = time.strftime('%Y-%m-%d %H:%M:%S')
-        for name, info in found.items():
-            ltp = get_ltp(smartApi, 'NSE', info.get('tradingsymbol') or '', info.get('symboltoken') or '')
-            if ltp is None:
-                messages.append(f"{ts} | {name}: LTP not available")
-            else:
-                messages.append(f"{ts} | {name}: {ltp}")
-        text = "\\n".join(messages)
-        logger.info('Sending message:\\n%s', text)
-        tele_send(bot, TELE_CHAT_ID, text)
-        time.sleep(POLL_INTERVAL)
-
-# Start bot in a background thread at import time so Gunicorn/Procfile runs it.
-thread = threading.Thread(target=bot_loop, daemon=True)
-thread.start()
-
-# Minimal Flask app for healthcheck
-@app.route('/')
-def index():
-    status = {
-        'bot_thread_alive': thread.is_alive(),
-        'poll_interval': POLL_INTERVAL
-    }
-    return jsonify(status)
-
-# Expose app for gunicorn: `gunicorn main:app`
-if __name__ == '__main__':
-    # allow running locally with `python main.py`
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)))
+        logger.error(f"Fatal error: {e}")
+        exit(1)
