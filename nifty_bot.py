@@ -37,11 +37,15 @@ class NiftyLTPBot:
     def get_nifty_ltp(self):
         """Dhan वरून Nifty 50 चा LTP घेतो"""
         try:
+            # Dhan constants
+            IDX = 3  # Index segment
+            INDEX = 0  # Index instrument type
+            
             # Method 1: Historical data वरून latest price
             response = self.dhan.historical_daily_data(
                 symbol=NIFTY_50_SECURITY_ID,
-                exchange_segment=self.dhan.IDX,
-                instrument_type=self.dhan.INDEX,
+                exchange_segment=IDX,
+                instrument_type=INDEX,
                 from_date="2025-10-01",
                 to_date="2025-10-06"
             )
@@ -59,7 +63,7 @@ class NiftyLTPBot:
                 instruments = [
                     {
                         "securityId": NIFTY_50_SECURITY_ID,
-                        "exchangeSegment": marketfeed.IDX
+                        "exchangeSegment": IDX
                     }
                 ]
                 
