@@ -1,7 +1,7 @@
 import asyncio
 import os
 from telegram import Bot
-from dhanhq import dhanhq, marketfeed
+from dhanhq import dhanhq
 from datetime import datetime
 import logging
 
@@ -13,15 +13,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========================
-# CONFIGURATION - Environment Variables वरून घ्या
+# CONFIGURATION
 # ========================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
-# Nifty 50 Security ID
-NIFTY_50_SECURITY_ID = "13"  # Nifty 50 Index
+# Nifty 50 Index Security ID
+NIFTY_50_SECURITY_ID = "13"
 
 # ========================
 # BOT CODE
@@ -35,47 +35,44 @@ class NiftyLTPBot:
         logger.info("Bot initialized successfully")
     
     def get_nifty_ltp(self):
-        """Dhan वरून Nifty 50 चा LTP घेतो"""
+        """Dhan v2 API वरून Nifty 50 चा LTP घेतो"""
         try:
-            # Dhan constants
-            IDX = 3  # Index segment
-            INDEX = 0  # Index instrument type
+            # Dhan v2 Market Quote API
+            # Request structure: {"IDX_I": [security_ids]}
+            instruments = {
+                "IDX_I": [int(NIFTY_50_SECURITY_ID)]
+            }
             
-            # Method 1: Historical data वरून latest price
-            response = self.dhan.historical_daily_data(
-                symbol=NIFTY_50_SECURITY_ID,
-                exchange_segment=IDX,
-                instrument_type=INDEX,
-                from_date="2025-10-01",
-                to_date="2025-10-06"
-            )
+            # Get OHLC + LTP data
+            response = self.dhan.get_market_quote(instruments)
             
-            if response and 'data' in response and len(response['data']) > 0:
-                latest_data = response['data'][-1]
-                ltp = latest_data.get('close', None)
+            logger.info(f"API Response: {response}")
+            
+            if response and 'data' in response and 'IDX_I' in response['data']:
+                nifty_data = response['data']['IDX_I'].get(NIFTY_50_SECURITY_ID, {})
                 
-                if ltp:
-                    logger.info(f"LTP fetched from historical: {ltp}")
-                    return ltp
-            
-            # Fallback: Try market quote
-            try:
-                instruments = [
-                    {
-                        "securityId": NIFTY_50_SECURITY_ID,
-                        "exchangeSegment": IDX
+                if nifty_data and 'last_price' in nifty_data:
+                    ltp = nifty_data['last_price']
+                    ohlc = nifty_data.get('ohlc', {})
+                    
+                    data = {
+                        'ltp': ltp,
+                        'open': ohlc.get('open', 0),
+                        'high': ohlc.get('high', 0),
+                        'low': ohlc.get('low', 0),
+                        'close': ohlc.get('close', 0)
                     }
-                ]
-                
-                quote_response = self.dhan.get_market_quote(instruments)
-                
-                if quote_response and 'data' in quote_response and len(quote_response['data']) > 0:
-                    ltp = quote_response['data'][0].get('LTP', None)
-                    if ltp:
-                        logger.info(f"LTP fetched from quote: {ltp}")
-                        return ltp
-            except Exception as e:
-                logger.warning(f"Market quote failed: {e}")
+                    
+                    # Calculate change
+                    if data['close'] > 0:
+                        data['change'] = ltp - data['close']
+                        data['change_pct'] = (data['change'] / data['close']) * 100
+                    else:
+                        data['change'] = 0
+                        data['change_pct'] = 0
+                    
+                    logger.info(f"LTP fetched: {ltp}")
+                    return data
             
             return None
             
@@ -83,21 +80,39 @@ class NiftyLTPBot:
             logger.error(f"Error getting LTP: {e}")
             return None
     
-    async def send_ltp_message(self, ltp):
+    async def send_ltp_message(self, data):
         """Telegram वर LTP पाठवतो"""
         try:
             timestamp = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-            message = f"📊 *NIFTY 50 LTP*\n\n"
-            message += f"💰 Price: ₹{ltp:,.2f}\n"
-            message += f"🕐 Time: {timestamp}\n"
-            message += f"\n_Updated every minute_ ⏱️"
+            
+            # Change indicator
+            change_emoji = "🟢" if data['change'] >= 0 else "🔴"
+            change_sign = "+" if data['change'] >= 0 else ""
+            
+            message = f"📊 *NIFTY 50 LIVE*\n\n"
+            message += f"💰 LTP: ₹{data['ltp']:,.2f}\n"
+            
+            if data['change'] != 0:
+                message += f"{change_emoji} Change: {change_sign}{data['change']:,.2f} ({change_sign}{data['change_pct']:.2f}%)\n\n"
+            
+            if data['open'] > 0:
+                message += f"🔵 Open: ₹{data['open']:,.2f}\n"
+            if data['high'] > 0:
+                message += f"📈 High: ₹{data['high']:,.2f}\n"
+            if data['low'] > 0:
+                message += f"📉 Low: ₹{data['low']:,.2f}\n"
+            if data['close'] > 0:
+                message += f"⚪ Prev Close: ₹{data['close']:,.2f}\n"
+            
+            message += f"\n🕐 Time: {timestamp}\n"
+            message += f"_Updated every minute_ ⏱️"
             
             await self.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=message,
                 parse_mode='Markdown'
             )
-            logger.info(f"Message sent - LTP: {ltp}")
+            logger.info(f"Message sent - LTP: {data['ltp']}")
             
         except Exception as e:
             logger.error(f"Error sending message: {e}")
@@ -110,15 +125,14 @@ class NiftyLTPBot:
         
         while self.running:
             try:
-                ltp = self.get_nifty_ltp()
+                data = self.get_nifty_ltp()
                 
-                if ltp:
-                    await self.send_ltp_message(ltp)
+                if data:
+                    await self.send_ltp_message(data)
                 else:
-                    logger.warning("Could not fetch LTP - Market might be closed")
-                    # Market बंद असल्यास message पाठवा
-                    await self.send_market_closed_message()
+                    logger.warning("Could not fetch LTP - Market might be closed or API issue")
                 
+                # 1 minute wait
                 await asyncio.sleep(60)
                 
             except KeyboardInterrupt:
@@ -133,9 +147,10 @@ class NiftyLTPBot:
         """Bot सुरू झाल्यावर message पाठवतो"""
         try:
             msg = "🤖 *Nifty 50 LTP Bot Started!*\n\n"
-            msg += "तुम्हाला आता दर मिनिटाला Nifty 50 चा LTP मिळेल! 📈\n"
-            msg += f"Deployed on Railway.app 🚂\n\n"
-            msg += "_Note: LTP only during market hours (9:15 AM - 3:30 PM)_"
+            msg += "तुम्हाला आता दर मिनिटाला Nifty 50 चा Live LTP मिळेल! 📈\n\n"
+            msg += "✅ Powered by Dhan API v2\n"
+            msg += "🚂 Deployed on Railway.app\n\n"
+            msg += "_Market Hours: 9:15 AM - 3:30 PM (Mon-Fri)_"
             
             await self.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
@@ -145,21 +160,6 @@ class NiftyLTPBot:
             logger.info("Startup message sent")
         except Exception as e:
             logger.error(f"Error sending startup message: {e}")
-    
-    async def send_market_closed_message(self):
-        """Market बंद असल्यास message"""
-        try:
-            msg = "⏸️ *Market Closed*\n\n"
-            msg += "LTP updates will resume during market hours.\n"
-            msg += "Market Hours: 9:15 AM - 3:30 PM (Mon-Fri)"
-            
-            await self.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=msg,
-                parse_mode='Markdown'
-            )
-        except Exception as e:
-            logger.error(f"Error sending market closed message: {e}")
 
 
 # ========================
