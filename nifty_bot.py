@@ -1,7 +1,7 @@
 import asyncio
 import os
 from telegram import Bot
-from dhanhq import dhanhq
+import requests
 from datetime import datetime
 import logging
 
@@ -20,8 +20,13 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
+# Dhan API URLs
+DHAN_API_BASE = "https://api.dhan.co"
+DHAN_LTP_URL = f"{DHAN_API_BASE}/v2/marketfeed/ltp"
+DHAN_OHLC_URL = f"{DHAN_API_BASE}/v2/marketfeed/ohlc"
+
 # Nifty 50 Index Security ID
-NIFTY_50_SECURITY_ID = "13"
+NIFTY_50_SECURITY_ID = 13
 
 # ========================
 # BOT CODE
@@ -30,52 +35,73 @@ NIFTY_50_SECURITY_ID = "13"
 class NiftyLTPBot:
     def __init__(self):
         self.bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        self.dhan = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
         self.running = True
+        self.headers = {
+            'access-token': DHAN_ACCESS_TOKEN,
+            'client-id': DHAN_CLIENT_ID,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
         logger.info("Bot initialized successfully")
     
     def get_nifty_ltp(self):
-        """Dhan v2 API वरून Nifty 50 चा LTP घेतो"""
+        """Dhan REST API वरून Nifty 50 चा LTP घेतो"""
         try:
-            # Dhan v2 Market Quote API
-            # Request structure: {"IDX_I": [security_ids]}
-            instruments = {
-                "IDX_I": [int(NIFTY_50_SECURITY_ID)]
+            # Request body for Nifty 50 Index
+            payload = {
+                "IDX_I": [NIFTY_50_SECURITY_ID]
             }
             
-            # Get OHLC + LTP data
-            response = self.dhan.get_market_quote(instruments)
+            # Get OHLC data (includes LTP)
+            response = requests.post(
+                DHAN_OHLC_URL,
+                json=payload,
+                headers=self.headers,
+                timeout=10
+            )
             
-            logger.info(f"API Response: {response}")
+            logger.info(f"API Status Code: {response.status_code}")
+            logger.info(f"API Response: {response.text}")
             
-            if response and 'data' in response and 'IDX_I' in response['data']:
-                nifty_data = response['data']['IDX_I'].get(NIFTY_50_SECURITY_ID, {})
+            if response.status_code == 200:
+                data = response.json()
                 
-                if nifty_data and 'last_price' in nifty_data:
-                    ltp = nifty_data['last_price']
-                    ohlc = nifty_data.get('ohlc', {})
+                if data.get('status') == 'success' and 'data' in data:
+                    idx_data = data['data'].get('IDX_I', {})
+                    nifty_data = idx_data.get(str(NIFTY_50_SECURITY_ID), {})
                     
-                    data = {
-                        'ltp': ltp,
-                        'open': ohlc.get('open', 0),
-                        'high': ohlc.get('high', 0),
-                        'low': ohlc.get('low', 0),
-                        'close': ohlc.get('close', 0)
-                    }
-                    
-                    # Calculate change
-                    if data['close'] > 0:
-                        data['change'] = ltp - data['close']
-                        data['change_pct'] = (data['change'] / data['close']) * 100
-                    else:
-                        data['change'] = 0
-                        data['change_pct'] = 0
-                    
-                    logger.info(f"LTP fetched: {ltp}")
-                    return data
+                    if nifty_data and 'last_price' in nifty_data:
+                        ltp = nifty_data['last_price']
+                        ohlc = nifty_data.get('ohlc', {})
+                        
+                        result = {
+                            'ltp': ltp,
+                            'open': ohlc.get('open', 0),
+                            'high': ohlc.get('high', 0),
+                            'low': ohlc.get('low', 0),
+                            'close': ohlc.get('close', 0)
+                        }
+                        
+                        # Calculate change
+                        if result['close'] > 0:
+                            result['change'] = ltp - result['close']
+                            result['change_pct'] = (result['change'] / result['close']) * 100
+                        else:
+                            result['change'] = 0
+                            result['change_pct'] = 0
+                        
+                        logger.info(f"LTP fetched successfully: {ltp}")
+                        return result
             
+            logger.warning(f"API returned non-success response: {response.status_code}")
             return None
             
+        except requests.exceptions.Timeout:
+            logger.error("API request timeout")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API request error: {e}")
+            return None
         except Exception as e:
             logger.error(f"Error getting LTP: {e}")
             return None
@@ -148,7 +174,7 @@ class NiftyLTPBot:
         try:
             msg = "🤖 *Nifty 50 LTP Bot Started!*\n\n"
             msg += "तुम्हाला आता दर मिनिटाला Nifty 50 चा Live LTP मिळेल! 📈\n\n"
-            msg += "✅ Powered by Dhan API v2\n"
+            msg += "✅ Powered by Dhan API v2 (REST)\n"
             msg += "🚂 Deployed on Railway.app\n\n"
             msg += "_Market Hours: 9:15 AM - 3:30 PM (Mon-Fri)_"
             
