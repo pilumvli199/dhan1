@@ -1,1 +1,1 @@
-web: python nifty_bot.py
+web: python main.bot.py
